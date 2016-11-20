@@ -42,31 +42,33 @@ class FDTD_base:
     as possible.
     '''
     n_dimensions = None
+    mediums = None
+    boundaries = None
 
-    def __init__(self, source_Fmax, λ_rmax, grid_size, medium, boundary):
+    def __init__(self, source_Fmax, λ_rmax, axes_lengths, medium, boundary):
         '''
         source_Fmax :: Int
             Maximum frequency that the simulation will resolve for.
             This is used to calibrate source pulses.
 
-        λ_rmax      :: Int
+        λ_rmax :: Int
             Number of grid cells used to cover the mininimum
             wavelength at the maximum resolved frequency.
 
-        grid_size   :: (Int | Tuple[Int, ...])
+        axes_lengths :: Tuple[Int, ...]
             Length of each axis in the simulation. If an int is passed then
             each axis is the same size. If a tuple is passed then there must
             be one value for each axis.
 
-        medium      :: (Str | Tuple[Float, Float])
+        medium :: (Str | Tuple[Float, Float])
             Either a tuple of (εr, μr) for the main simulation
             medium or a string specifying a default medium.
 
-        boundary    :: Str
+        boundary :: Str
             Numeric boundary conditions to use at the end of the
             simulation grid.
         '''
-        self.grid_size = grid_size
+        self.axes_lengths = axes_lengths
         self.boundary = boundary
         self.medium = medium
         self.λ_rmax = λ_rmax
@@ -79,27 +81,79 @@ class FDTD_base:
         self.sources = {'E': [], 'M': []}
         self.device_regions = []
 
-    def run(self, sources, devices, figsize, dpi, filename):
-        '''
-        Add in Electric and Magnetic sources then run the simulation.
-        If a filename is specified then an mp4 will be saved under that name
-        in the working directory.
-
-        sources :: A list of source tuples defining the source as Electric or
-                   Magnetic and a location.
-                        (('E'|'M'), z-coordinate)
-                    e.g. ('E', 50), ('M', 0)
-        devices :: A list of device tuples specifying εr, μr and a region.
-                        (2, 2, (20, 50))
-                   TODO:: Allow εr and μr to be lambdas
-        '''
-        pass
-
     def initialise_grid(self, devices, sources):
         '''
         Initialise the simulation space with relative values for ε and μ
         '''
-        pass
+        εr, μr = self.mediums.get(self.medium, self.medium)
+
+        try:
+            self.ε_relative = np.array(
+                [np.full(axis, εr) for axis in self.axis_lengths]
+            )
+            self.μ_relative = np.array(
+                [np.full(axis, μr) for axis in self.axis_lengths]
+            )
+        except:
+            raise TypeError('Invalid medium specification')
+
+        self.insert_devices(devices)
+
+        d_axes = [self.dx, self.dy, self.dz]
+
+        for i, l in zip(d_axes, self.axes_lengths):
+            n_avg = np.sqrt(
+                    sum(self.ε_relative) * sum(self.μ_relative) / l ** 2
+                )
+            d_axes[i] = min(10, (self.λ_min / n_avg / self.λ_rmax))
+
+        # Ensure that the wave travels one grid cell in 2dz time intervals
+        # NOTE:: Devices should not be allowed at boundaries!
+        n_boundary = np.sqrt(εr * μr)
+        d_max, l_max = max(d_axes), max(self.axes_lengths)
+
+        source_travel_time = n_avg * l_max * d_max / c0
+        self.dt = n_boundary * d_max / (2 * c0)
+
+        self.compute_sources_and_duration(sources, source_travel_time)
+
+    def insert_devices(self, devices):
+        '''
+        Implementations are required to define how to add sources to their
+        n-dimensional εr and μr arrays
+        '''
+        # NOTE:: This is an example for the 1D case
+        # for device in devices:
+        #     εr, μr, region = device
+        #     self.ε_relative[slice(*region)] = εr
+        #     self.μ_relative[slice(*region)] = μr
+        raise NotImplemented
+
+    def compute_sources_and_duration(self, sources, source_travel_time):
+        '''
+        Sources are specifed with a type (E/M) and a coordinate position
+        that is compatible with the formulation of the Implementation
+        update equations.
+        '''
+        source_duration = 0.5 / self.source_Fmax
+        source_time_offset = 5 * source_duration
+
+        # NOTE:: This is an arbitrary choice of the source pulse duration
+        #        and two passes over the grid.
+        simulation_time = 2 * source_time_offset + 2 * source_travel_time
+
+        self.num_steps = int(np.ceil(simulation_time / self.dt))
+
+        time_intervals = np.arange(0, self.num_steps) * self.dt
+
+        for source in sources:
+            # TODO:: allow pulses other than gaussian
+            pulse_func = gaussian
+            source_type, source_position = source
+            source_pulse = np.apply_along_axis(
+                    pulse_func, 0, time_intervals,
+                    source_time_offset, (source_duration / 4))
+            self.sources[source_type].append((source_position, source_pulse))
 
     def set_update_coefficients(self, ε_relative, μ_relative, dt):
         '''
@@ -128,6 +182,24 @@ class FDTD_base:
         '''
         pass
 
+    def run(self, sources, devices, figsize, dpi, filename):
+        '''
+        Add in Electric and Magnetic sources then run the simulation.
+        If a filename is specified then an mp4 will be saved under that name
+        in the working directory.
+
+        sources :: A list of source tuples defining the source as Electric or
+                   Magnetic and a location.
+                        (('E'|'M'), z-coordinate)
+                    e.g. ('E', 50), ('M', 0)
+        devices :: A list of device tuples specifying εr, μr and a region.
+                        (2, 2, (20, 50))
+                   TODO:: Allow εr and μr to be lambdas
+        '''
+        pass
+
+
+# .: Implementations :.
 
 class FDTD_1D_Maxwell(FDTD_base):
     ''' A 1D simulation of classical EM.
@@ -135,11 +207,27 @@ class FDTD_1D_Maxwell(FDTD_base):
     Available boundary conditions: Drichlet, periodic, perfect
     '''
     n_dimensions = 1
+    mediums = {
+            'air': (1, 1),
+            'free_space': (ε0, μ0)
+        }
+    boundaries = {
+            'Drichlet': {'values': (0, 0)},
+            'periodic': {'indices': (0, -1)},
+            'perfect': None
+        }
 
     def __init__(self, source_Fmax=5e9, λ_rmax=20,
                  grid_size=200, medium='air', boundary='Drichlet'):
         '''Default values to initialise a 1D simulation'''
-        super().__init__(source_Fmax, λ_rmax, grid_size, medium, boundary)
+        super().__init__(
+            source_Fmax=source_Fmax,
+            λ_rmax=λ_rmax,
+            axes_lengths=(0, 0, grid_size),
+            medium=medium,
+            boundary=boundary
+        )
+        self.grid_size = grid_size
 
     def run(self, sources=[], devices=[],
             figsize=(600, 400), dpi=50, filename=None):
