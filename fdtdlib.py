@@ -1,8 +1,6 @@
 '''
 FDTD Implementation in numpy and matplotlib
 
-NOTE:: This is currently tied to a 1D simulation and work needs to be
-       done to allow a choice of 1,2,3D.
 '''
 import numpy as np
 import seaborn as sns
@@ -36,22 +34,37 @@ def gaussian(t, t0, σ):
     return np.exp(-(t - t0) ** 2 / (2 * σ ** 2)) / 2
 
 
-class FDTD:
+class FDTD_base:
     '''
     Base class for FDTD simulations.
-    At the moment this defaults to a 1D simulation of classical EM.
+
+    This is intended to be framework and dimension agnostic as far
+    as possible.
     '''
-    def __init__(self, source_Fmax=5e9, λ_rmax=20,
-                 grid_size=200, medium='air', boundary='Drichlet'):
+    n_dimensions = None
+
+    def __init__(self, source_Fmax, λ_rmax, grid_size, medium, boundary):
         '''
-        source_Fmax :: Maximum frequency that you want to resolve.
-        λ_rmax      :: Number of grid cells used to cover the mininimum
-                       wavelength at maximum frequency.
-        grid_size   :: Length of each axis in the simulation.
-        medium      :: Either a tuple of (εr, μr) for the primary simulation
-                       medium or one of the strings "air" or "free_space".
-        boundary    :: Numeric boundary conditions to use at the end of the
-                       simulation grid: "Drichlet", "periodic" or "perfect".
+        source_Fmax :: Int
+            Maximum frequency that the simulation will resolve for.
+            This is used to calibrate source pulses.
+
+        λ_rmax      :: Int
+            Number of grid cells used to cover the mininimum
+            wavelength at the maximum resolved frequency.
+
+        grid_size   :: (Int | Tuple[Int, ...])
+            Length of each axis in the simulation. If an int is passed then
+            each axis is the same size. If a tuple is passed then there must
+            be one value for each axis.
+
+        medium      :: (Str | Tuple[Float, Float])
+            Either a tuple of (εr, μr) for the main simulation
+            medium or a string specifying a default medium.
+
+        boundary    :: Str
+            Numeric boundary conditions to use at the end of the
+            simulation grid.
         '''
         self.grid_size = grid_size
         self.boundary = boundary
@@ -60,11 +73,13 @@ class FDTD:
         self.source_Fmax = source_Fmax
         self.λ_min = c0 / source_Fmax
 
+        # Space-time intervals for update equations
+        self.dt = self.dx = self.dy = self.dz = None
+
         self.sources = {'E': [], 'M': []}
         self.device_regions = []
 
-    def run(self, sources=[], devices=[],
-            figsize=(600, 400), dpi=50, filename=None):
+    def run(self, sources, devices, figsize, dpi, filename):
         '''
         Add in Electric and Magnetic sources then run the simulation.
         If a filename is specified then an mp4 will be saved under that name
@@ -77,6 +92,62 @@ class FDTD:
         devices :: A list of device tuples specifying εr, μr and a region.
                         (2, 2, (20, 50))
                    TODO:: Allow εr and μr to be lambdas
+        '''
+        pass
+
+    def initialise_grid(self, devices, sources):
+        '''
+        Initialise the simulation space with relative values for ε and μ
+        '''
+        pass
+
+    def set_update_coefficients(self, ε_relative, μ_relative, dt):
+        '''
+        Compute the FDTD update coefficents for each grid cell based
+        on the timestep self.dt and the values of (ε|μ)_relative at
+        each cell.
+        NOTE:: These are constant for the duration of the simulation
+               as it is assumed nothing is moving.
+        '''
+        pass
+
+    def initialise_plot(self, devices, εrμr, figsize, dpi):
+        '''
+        Set up the animation figure, axes and lines
+        '''
+        pass
+
+    def update_fields(self, step, dz):
+        '''
+        For a given time step, this updates every point in the simulation
+        grid to its new value.
+        NOTE:: Due to the use of a Yee Lattice, the E and H fields are
+               staggered in both space and time. This simplifies the
+               update equations but does mean that interpolation is
+               required if you want to obtain values for discrete points.
+        '''
+        pass
+
+
+class FDTD_1D_Maxwell(FDTD_base):
+    ''' A 1D simulation of classical EM.
+    Available default mediums: air, free_space
+    Available boundary conditions: Drichlet, periodic, perfect
+    '''
+    n_dimensions = 1
+
+    def __init__(self, source_Fmax=5e9, λ_rmax=20,
+                 grid_size=200, medium='air', boundary='Drichlet'):
+        '''Default values to initialise a 1D simulation'''
+        super().__init__(source_Fmax, λ_rmax, grid_size, medium, boundary)
+
+    def run(self, sources=[], devices=[],
+            figsize=(600, 400), dpi=50, filename=None):
+        '''
+        sources :: [(('E'|'M'), z-coordinate), ...]
+                   >> [('E', 50), ('M', 0)]
+        devices :: [(εr, μr, (start, stop), ...]
+                   >> [(2, 2, (20, 50))]
         '''
         # Initialise E and H fields
         self.Ey = np.zeros(self.grid_size)
@@ -101,7 +172,8 @@ class FDTD:
             if step == self.num_steps - 1:
                 # Turn off the source after the first loop
                 self.use_sources = False
-            # Update both fields and then plot
+            # Update both fields twice and then plot
+            self.update_fields(step, dz)
             self.update_fields(step, dz)
             lines[0].set_data(x, self.Hx)
             lines[1].set_data(x, self.Ey)
@@ -128,7 +200,7 @@ class FDTD:
 
     def initialise_grid(self, devices, sources):
         '''
-        Initialise the simulation space with relative values for ε and μ
+        Set all initial grid values and compute source effects.
         '''
         if self.medium == 'free_space':
             ε_relative = np.full(self.grid_size, ε0)
@@ -153,8 +225,10 @@ class FDTD:
             μ_relative[slice(*region)] = μr
 
         # Maximum refractive index
-        n_max = np.sqrt(max(ε_relative) * max(μ_relative))
-        dz = min(10, (self.λ_min / n_max / self.λ_rmax))
+        n_avg = np.sqrt(
+                sum(ε_relative) * sum(μ_relative) / self.grid_size ** 2
+            )
+        dz = min(10, (self.λ_min / n_avg / self.λ_rmax))
 
         # Ensure that the wave travels one grid cell in 2dz time intervals
         n_boundary = np.sqrt(ε_relative[0] * μ_relative[0])
@@ -165,7 +239,7 @@ class FDTD:
         source_duration = 0.5 / self.source_Fmax
         source_time_offset = 5 * source_duration
         # Worst case time taken for the pulse to travel once over the grid
-        source_travel_time = n_max * self.grid_size * dz / c0
+        source_travel_time = n_avg * self.grid_size * dz / c0
         # NOTE:: Using pulse begining/end and 3 propagations
         simulation_time = 2 * source_time_offset + 2 * source_travel_time
 
@@ -180,16 +254,13 @@ class FDTD:
             source_type, source_position = source
             source_pulse = np.apply_along_axis(
                     pulse_func, 0, time_intervals,
-                    source_time_offset, source_duration)
+                    source_time_offset, (source_duration / 4))
             self.sources[source_type].append((source_position, source_pulse))
 
         return dz, dt, ε_relative, μ_relative
 
     def set_update_coefficients(self, ε_relative, μ_relative, dt):
         '''
-        Compute the FDTD update coefficents based on the timestep dt
-        and the current values of (ε|μ)_relative.
-
         NOTE: As this is a 1D case, the wave propagation k is being
               taken to be along the z axis and the resulting E and H
               fields are along the y and x axes respectively.
@@ -223,7 +294,7 @@ class FDTD:
             else:
                 color = 'red'
             if ε*μ > εrμr:
-                alpha = 0.7
+                alpha = 0.5
             else:
                 alpha = 0.3
             ax.axvspan(start, stop, alpha=alpha, color=color)
@@ -291,13 +362,18 @@ class FDTD:
 
 if __name__ == '__main__':
     sources = [('E', 0)]
-    devices = [(2, 1, (90, 120)), (0.6, 1, (120, 150))]
-    devices = []
+    # High-low-high ||::::::||
+    devices = [
+        (2, 2, (95, 100)),
+        (0.5, 0.5, (100, 125)),
+        (2, 2, (125, 130))
+    ]
+    # devices = []
     filename = 'air_and_unmatched_materials.mp4'
     filename = None
 
-    simulation = FDTD(
-            source_Fmax=5e9, λ_rmax=20, grid_size=200,
+    simulation = FDTD_1D_Maxwell(
+            source_Fmax=1e6, λ_rmax=20, grid_size=200,
             medium='air', boundary='Drichlet'
         )
     simulation.run(
