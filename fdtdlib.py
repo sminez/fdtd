@@ -361,20 +361,22 @@ class FDTD_1D_Maxwell(FDTD_base):
         lines[1].set_data(x, self.Ey)
         return lines
 
+
 if __name__ == '__main__':
     sources = [('E', 0)]
     # High-low-high ||::::::||
     devices = [
         (2, 2, (95, 100)),
-        (0.5, 0.5, (100, 125)),
+        (1.2, 1.0, (100, 125)),
         (2, 2, (125, 130))
     ]
-    devices = []
+
+    # devices = []
     filename = 'air_and_unmatched_materials.mp4'
-    filename = None
+    # filename = None
 
     simulation = FDTD_1D_Maxwell(
-            source_Fmax=5e9, λ_rmax=20, grid_size=200,
+            source_Fmax=1e6, λ_rmax=20, grid_size=200,
             medium='air', boundary='Drichlet'
         )
     simulation.run(
